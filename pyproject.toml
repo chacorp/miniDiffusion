@@ -7,6 +7,7 @@ dependencies = [
     "numpy>=1.24",
     "matplotlib>=3.7",
     "wandb>=0.17",
+    "nvitop>=1.7.0",
 ]
 
 # PyTorch CUDA build (cu124).
