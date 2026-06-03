@@ -22,36 +22,33 @@ class SinusoidalPosEmb(nn.Module):
 
 
 class ConditionedResidualBlock(nn.Module):
-    """Pre-LN residual block with cross-attention conditioning.
+    """Pre-LN residual block with FiLM-style cluster conditioning.
 
-    Step 1 — MLP update (self):   h = h + MLP(LN(h))
-    Step 2 — Attention update:    stack [h, c_emb] as 2-token sequence,
-                                  run self-attention, add h's output token back.
-                                  h can attend to c_emb so conditioning is
-                                  content-dependent, not just additive.
+    The cluster embedding predicts scale, shift, and gate vectors that modulate
+    the normalized hidden state before the MLP update.
     """
 
-    def __init__(self, dim: int, dropout: float, num_heads: int = 4):
+    def __init__(self, dim: int, dropout: float, mlp_mult: int = 4):
         super().__init__()
-        self.mlp_norm = nn.LayerNorm(dim)
+        inner_dim = dim * mlp_mult
+
+        self.norm = nn.LayerNorm(dim)
+        self.cond = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(dim, dim * 3),
+        )
         self.mlp = nn.Sequential(
-            nn.Linear(dim, dim),
+            nn.Linear(dim, inner_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(dim, dim),
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout),
         )
-        self.attn_norm_h = nn.LayerNorm(dim)
-        self.attn_norm_c = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
 
     def forward(self, h: torch.Tensor, c_emb: torch.Tensor) -> torch.Tensor:
-        # MLP residual
-        h = h + self.mlp(self.mlp_norm(h))
-        # Attention: [h, c_emb] as 2-token sequence; only h's output is used
-        tokens = torch.stack([self.attn_norm_h(h), self.attn_norm_c(c_emb)], dim=1)  # (B, 2, dim)
-        attn_out, _ = self.attn(tokens, tokens, tokens)
-        h = h + attn_out[:, 0]  # residual on h's token only
-        return h
+        scale, shift, gate = self.cond(c_emb).chunk(3, dim=-1)
+        x = self.norm(h) * (1.0 + scale) + shift
+        return h + torch.sigmoid(gate) * self.mlp(x)
 
 
 # ─── Diffusion model ──────────────────────────────────────────────
