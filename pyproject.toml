@@ -1,0 +1,20 @@
+[project]
+name = "mini-diffusion"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
+    "wandb>=0.17",
+]
+
+# PyTorch CUDA build (cu124).
+# CPU 전용으로 쓰려면 아래 두 섹션을 삭제하세요.
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu124" }]
