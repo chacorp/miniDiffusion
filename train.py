@@ -22,6 +22,7 @@ config = dict(
     num_samples  = 50000,
     val_ratio    = 0.1,
     sample_every = 20,   # log generated scatter every N epochs
+    p_uncond     = 0.1,  # prob of dropping class label during training (CFG)
 )
 
 # ─── Setup ────────────────────────────────────────────────────────
@@ -91,7 +92,11 @@ for epoch in range(1, cfg.epochs + 1):
         t = torch.randint(0, cfg.T, (x0.shape[0],), device=device)
         x_t, noise = q_sample(x0, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod)
 
-        loss = F.mse_loss(model(x_t, t, c), noise)
+        # CFG: randomly replace class label with null token
+        c_in = c.clone()
+        c_in[torch.rand(c_in.shape[0], device=device) < cfg.p_uncond] = cfg.num_clusters
+
+        loss = F.mse_loss(model(x_t, t, c_in), noise)
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

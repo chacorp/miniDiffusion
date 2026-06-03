@@ -82,8 +82,9 @@ class DiffusionMLP(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
 
-        # Cluster condition embedding
-        self.cluster_emb = nn.Embedding(num_clusters, hidden_dim)
+        # Cluster condition embedding (index num_clusters = null/unconditional token)
+        self.null_class  = num_clusters
+        self.cluster_emb = nn.Embedding(num_clusters + 1, hidden_dim)
 
         # Input projection
         self.input_proj = nn.Linear(2, hidden_dim)
@@ -184,3 +185,89 @@ def p_sample_loop(
     for t_idx in reversed(range(T)):
         x = p_sample(model, x, t_idx, c, betas, alphas, alphas_cumprod)
     return x
+
+
+# ─── Classifier-free guidance ─────────────────────────────────────
+
+@torch.no_grad()
+def p_sample_cfg(
+    model: DiffusionMLP,
+    x_t: torch.Tensor,
+    t_idx: int,
+    c: torch.Tensor,
+    betas: torch.Tensor,
+    alphas: torch.Tensor,
+    alphas_cumprod: torch.Tensor,
+    w: float = 1.0,
+    cfg_trained: bool = True,
+) -> torch.Tensor:
+    """DDPM reverse step with classifier-free guidance.
+
+    w=1: standard conditional (same as p_sample).
+    w>1: amplifies class signal; w=0: unconditional only.
+
+    cfg_trained=True  → null class embedding (requires retrain with p_uncond > 0).
+    cfg_trained=False → class-average as unconditional proxy; works with any checkpoint
+                        because ε_uncond ≈ E_c[ε_θ(x_t,t,c)] marginalises over all classes.
+    """
+    B = x_t.shape[0]
+    t = torch.full((B,), t_idx, device=x_t.device, dtype=torch.long)
+
+    eps_cond = model(x_t, t, c)
+    if w != 1.0:
+        if cfg_trained:
+            null_c     = torch.full((B,), model.null_class, device=x_t.device, dtype=torch.long)
+            eps_uncond = model(x_t, t, null_c)
+        else:
+            # ε_uncond ≈ (1/K) Σ_k ε_θ(x_t, t, k)  — single batched forward pass
+            K     = model.null_class   # number of real classes
+            x_rep = x_t.repeat(K, 1)  # (K*B, 2)
+            t_rep = t.repeat(K)        # (K*B,)
+            c_rep = torch.cat([
+                torch.full((B,), k, device=x_t.device, dtype=torch.long) for k in range(K)
+            ])
+            eps_uncond = model(x_rep, t_rep, c_rep).view(K, B, 2).mean(0)
+        eps = eps_uncond + w * (eps_cond - eps_uncond)
+    else:
+        eps = eps_cond
+
+    alpha_t   = alphas[t_idx]
+    alpha_bar = alphas_cumprod[t_idx]
+    beta_t    = betas[t_idx]
+
+    coef = (1.0 - alpha_t) / (1.0 - alpha_bar).sqrt()
+    mean = (x_t - coef * eps) / alpha_t.sqrt()
+
+    if t_idx == 0:
+        return mean
+    return mean + beta_t.sqrt() * torch.randn_like(x_t)
+
+
+@torch.no_grad()
+def p_sample_loop_with_traj(
+    model: DiffusionMLP,
+    c: torch.Tensor,
+    T: int,
+    betas: torch.Tensor,
+    alphas: torch.Tensor,
+    alphas_cumprod: torch.Tensor,
+    w: float = 1.0,
+    record_every: int = 50,
+    x_start: torch.Tensor | None = None,
+    cfg_trained: bool = True,
+) -> tuple[torch.Tensor, list[tuple[int, torch.Tensor]]]:
+    """Reverse chain with trajectory recording for visualization.
+
+    Returns (x_0, traj) where traj is a list of (t_idx, positions) snapshots.
+    """
+    x = (torch.randn(c.shape[0], 2, device=c.device)
+         if x_start is None else x_start.clone().to(c.device))
+
+    traj: list[tuple[int, torch.Tensor]] = [(T, x.cpu().clone())]
+    for t_idx in reversed(range(T)):
+        x = p_sample_cfg(model, x, t_idx, c, betas, alphas, alphas_cumprod,
+                         w=w, cfg_trained=cfg_trained)
+        if t_idx % record_every == 0:
+            traj.append((t_idx, x.cpu().clone()))
+
+    return x, traj
