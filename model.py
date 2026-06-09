@@ -109,15 +109,37 @@ class DiffusionMLP(nn.Module):
 
 def make_noise_schedule(
     T: int = 1000,
+    schedule: str = "cosine",
     beta_start: float = 1e-4,
     beta_end: float = 0.02,
+    s: float = 0.008,
     device=None,
 ) -> tuple[torch.Tensor, ...]:
-    betas = torch.linspace(beta_start, beta_end, T, device=device)
-    alphas = 1.0 - betas
-    alphas_cumprod = torch.cumprod(alphas, dim=0)
-    sqrt_alphas_cumprod = alphas_cumprod.sqrt()
+    """Build a DDPM noise schedule.
+
+    schedule="cosine"  Nichol & Dhariwal 2021 — recommended for low-variance data.
+    schedule="linear"  Ho et al. 2020 original.
+    """
+    if schedule == "cosine":
+        steps = torch.arange(T + 1, dtype=torch.float64)
+        f     = torch.cos(((steps / T + s) / (1.0 + s)) * math.pi / 2.0) ** 2
+        ac    = (f / f[0]).float()                              # ᾱ_0 … ᾱ_T
+        betas = (1.0 - ac[1:] / ac[:-1]).clamp(0.0, 0.999)    # β_1 … β_T
+    else:
+        betas = torch.linspace(beta_start, beta_end, T)
+
+    alphas                        = 1.0 - betas
+    alphas_cumprod                = torch.cumprod(alphas, dim=0)
+    sqrt_alphas_cumprod           = alphas_cumprod.sqrt()
     sqrt_one_minus_alphas_cumprod = (1.0 - alphas_cumprod).sqrt()
+
+    if device is not None:
+        betas                         = betas.to(device)
+        alphas                        = alphas.to(device)
+        alphas_cumprod                = alphas_cumprod.to(device)
+        sqrt_alphas_cumprod           = sqrt_alphas_cumprod.to(device)
+        sqrt_one_minus_alphas_cumprod = sqrt_one_minus_alphas_cumprod.to(device)
+
     return betas, alphas, alphas_cumprod, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod
 
 

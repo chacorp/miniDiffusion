@@ -8,6 +8,9 @@ dependencies = [
     "matplotlib>=3.7",
     "wandb>=0.17",
     "nvitop>=1.7.0",
+    "plotly>=6.8.0",
+    "pyqt6>=6.11.0",
+    "scipy>=1.15.3",
 ]
 
 # PyTorch CUDA build (cu124).

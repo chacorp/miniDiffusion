@@ -8,20 +8,19 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 
 import wandb
-from dataset import ShapeDataset
+from dataset import JsonShapeDataset
 from model import DiffusionMLP, make_noise_schedule, q_sample, p_sample_loop
 
 # ─── Hyperparameters ──────────────────────────────────────────────
 config = dict(
     T            = 1000,
     batch_size   = 512,
-    epochs       = 300,
+    epochs       = 500,
     lr           = 3e-4,
-    num_clusters = len(ShapeDataset.SHAPE_NAMES),   # 4
     # dataset
-    num_samples  = 50000,
-    noise        = 0.01,
-    outline      = True,
+    data_dir     = "data",
+    num_samples  = 60000,
+    noise        = 0.005,
     val_ratio    = 0.1,
     # model
     hidden_dim   = 128,
@@ -29,19 +28,19 @@ config = dict(
     emb_dim      = 64,
     dropout      = 0.1,
     # noise schedule
-    schedule      = "cosine",      # Fix 1: cosine schedule
+    schedule      = "cosine",
     # loss weighting
-    min_snr_gamma = 5.0,           # Fix 2: Min-SNR-γ (Hang et al. 2023)
+    min_snr_gamma = 5.0,
     # timestep sampling
-    t_logit_mean  = -1.0,          # Fix 3: logit-normal sampling
-    t_logit_std   = 1.5,           #   bias toward lower t (shape-learning region)
+    t_logit_mean  = -1.0,
+    t_logit_std   = 1.5,
     # training
-    sample_every  = 20,
+    sample_every  = 25,
     p_uncond      = 0.1,
 )
 
 # ─── Setup ────────────────────────────────────────────────────────
-wandb.init(project="mini-diffusion", config=config)
+wandb.init(project="mini-diffusion", name="json-shapes", config=config)
 cfg = wandb.config
 
 run_dir = Path("outputs") / datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -52,22 +51,30 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"device: {device}")
 print(f"run dir: {run_dir}")
 
-dataset = ShapeDataset(
-    num_samples=cfg.num_samples,
-    noise=cfg.noise,
-    outline=cfg.outline,
+dataset = JsonShapeDataset(
+    data_dir    = cfg.data_dir,
+    num_samples = cfg.num_samples,
+    noise       = cfg.noise,
 )
+K     = dataset.num_clusters
+names = dataset.shape_names
+print(f"classes: {K}  shapes: {names}")
+
 n_val   = int(len(dataset) * cfg.val_ratio)
 n_train = len(dataset) - n_val
-train_ds, val_ds = random_split(dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0))
+train_ds, val_ds = random_split(
+    dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0)
+)
 
-train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,  num_workers=0, pin_memory=device.type == "cuda")
-val_loader   = DataLoader(val_ds,   batch_size=cfg.batch_size, shuffle=False, num_workers=0, pin_memory=device.type == "cuda")
+train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True,
+                          num_workers=0, pin_memory=device.type == "cuda")
+val_loader   = DataLoader(val_ds,   batch_size=cfg.batch_size, shuffle=False,
+                          num_workers=0, pin_memory=device.type == "cuda")
 
 model = DiffusionMLP(
     hidden_dim   = cfg.hidden_dim,
     num_layers   = cfg.num_layers,
-    num_clusters = cfg.num_clusters,
+    num_clusters = K,
     emb_dim      = cfg.emb_dim,
     dropout      = cfg.dropout,
 ).to(device)
@@ -79,13 +86,10 @@ betas, alphas, alphas_cumprod, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumpro
     make_noise_schedule(cfg.T, schedule=cfg.schedule, device=device)
 )
 
-# Fix 2: precompute Min-SNR-γ loss weights (scaled by data variance so γ is
-# data-scale-agnostic — without this, γ=5 suppresses the shape-learning region
-# because our data has variance ~0.14, not ~1 as assumed in the original paper)
 _data_var = dataset.points.var(unbiased=False).item()
-snr       = alphas_cumprod / (1.0 - alphas_cumprod + 1e-8) * _data_var  # (T,)
-min_snr_w = (snr.clamp(max=cfg.min_snr_gamma) / snr.clamp(min=1e-8))    # (T,)
-print(f"data_var={_data_var:.4f}  SNR=1 at t~{(snr>1).sum().item()}")
+snr       = alphas_cumprod / (1.0 - alphas_cumprod + 1e-8) * _data_var
+min_snr_w = (snr.clamp(max=cfg.min_snr_gamma) / snr.clamp(min=1e-8))
+print(f"data_var={_data_var:.4f}  SNR=1 at t~{(snr > 1).sum().item()}")
 
 n_params = sum(p.numel() for p in model.parameters())
 print(f"parameters: {n_params:,}")
@@ -96,28 +100,34 @@ wandb.summary["parameters"] = n_params
 @torch.no_grad()
 def log_samples(epoch: int):
     model.eval()
-    n_per  = 300
-    tab10  = plt.cm.tab10.colors
-    K      = cfg.num_clusters
-    names  = ShapeDataset.SHAPE_NAMES
+    n_per = 400
+    tab20 = plt.cm.tab20.colors
 
-    # Generate per-class
     all_pts = []
     for cls in range(K):
-        c = torch.full((n_per,), cls, device=device, dtype=torch.long)
+        c   = torch.full((n_per,), cls, device=device, dtype=torch.long)
         pts = p_sample_loop(model, c, cfg.T, betas, alphas, alphas_cumprod).cpu().numpy()
         all_pts.append(pts)
 
-    fig, axes = plt.subplots(1, K, figsize=(3.5 * K, 3.5))
-    for i, (ax, pts) in enumerate(zip(axes, all_pts)):
+    ncols = 4
+    nrows = (K + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.5 * ncols, 3.5 * nrows))
+    axes = axes.flat
+
+    for i in range(K):
+        ax  = axes[i]
+        pts = all_pts[i]
         ax.scatter(pts[:, 0], pts[:, 1],
-                   color=tab10[i], s=5, alpha=0.7, linewidths=0)
+                   color=tab20[i % len(tab20)], s=4, alpha=0.7, linewidths=0)
         ax.add_patch(plt.Rectangle((-1, -1), 2, 2,
                      fill=False, edgecolor="#aaaaaa", lw=0.7, ls="--"))
         ax.set_xlim(-1.3, 1.3)
         ax.set_ylim(-1.3, 1.3)
-        ax.set_title(names[i], fontsize=11, color=tab10[i], fontweight="bold")
+        ax.set_title(names[i], fontsize=9, color=tab20[i % len(tab20)], fontweight="bold")
         ax.set_aspect("equal")
+        ax.axis("off")
+
+    for ax in list(axes)[K:]:
         ax.axis("off")
 
     fig.suptitle(f"epoch {epoch}", fontsize=11)
@@ -130,39 +140,36 @@ def log_samples(epoch: int):
 best_val = float("inf")
 
 for epoch in range(1, cfg.epochs + 1):
-    # Train
     model.train()
     train_loss = 0.0
     for x0, c in train_loader:
         x0, c = x0.to(device), c.to(device)
-        # Fix 3: logit-normal timestep sampling (bias toward shape-learning region)
+
         u = torch.randn(x0.shape[0], device=device) * cfg.t_logit_std + cfg.t_logit_mean
         t = (torch.sigmoid(u) * cfg.T).long().clamp(0, cfg.T - 1)
 
         x_t, noise = q_sample(x0, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod)
 
-        # CFG: randomly replace class label with null token
         c_in = c.clone()
-        c_in[torch.rand(c_in.shape[0], device=device) < cfg.p_uncond] = cfg.num_clusters
+        c_in[torch.rand(c_in.shape[0], device=device) < cfg.p_uncond] = K
 
-        # Fix 2: Min-SNR-γ weighted loss (per-sample then weighted mean)
         per_sample = F.mse_loss(model(x_t, t, c_in), noise, reduction="none").mean(-1)
         loss = (min_snr_w[t] * per_sample).mean()
+
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         train_loss += loss.item()
 
-    # Validation
     model.eval()
     val_loss = 0.0
     with torch.no_grad():
         for x0, c in val_loader:
             x0, c = x0.to(device), c.to(device)
-            t = torch.randint(0, cfg.T, (x0.shape[0],), device=device)
+            t     = torch.randint(0, cfg.T, (x0.shape[0],), device=device)
             x_t, noise = q_sample(x0, t, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod)
-            val_loss += F.mse_loss(model(x_t, t, c), noise).item()
+            val_loss  += F.mse_loss(model(x_t, t, c), noise).item()
 
     scheduler.step()
 
