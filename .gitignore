@@ -10,6 +10,8 @@ build/
 vis_out/
 
 # Training outputs
+outputs/
+visualize/
 *.pt
 *.pth
 generated.pt

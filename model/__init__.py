@@ -1,4 +1,4 @@
-from .ddpm_mlp import (
+from .mlp_denoiser import (
     SinusoidalPosEmb,
     ConditionedResidualBlock,
     DiffusionMLP,
@@ -8,4 +8,12 @@ from .ddpm_mlp import (
     p_sample_loop,
     p_sample_cfg,
     p_sample_loop_with_traj,
+)
+from .pointnet_denoiser import (
+    LearnedMeanPool,
+    PointNetFiLMBlock,
+    PointNetDenoiser,
+    q_sample_point_cloud,
+    resample_points,
+    VariablePointCountCollate,
 )
