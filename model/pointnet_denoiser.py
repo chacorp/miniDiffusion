@@ -159,6 +159,50 @@ def q_sample_point_cloud(
     return sqrt_a * x0 + sqrt_1a * noise, noise
 
 
+@torch.no_grad()
+def p_sample_point_cloud(
+    model: PointNetDenoiser,
+    x_t: torch.Tensor,
+    t_idx: int,
+    c: torch.Tensor,
+    betas: torch.Tensor,
+    alphas: torch.Tensor,
+    alphas_cumprod: torch.Tensor,
+) -> torch.Tensor:
+    """One DDPM reverse step for point clouds shaped (B, N, C)."""
+    B = x_t.shape[0]
+    t = torch.full((B,), t_idx, device=x_t.device, dtype=torch.long)
+
+    eps_pred = model(x_t, t, c)
+    alpha_t = alphas[t_idx]
+    alpha_bar = alphas_cumprod[t_idx]
+    beta_t = betas[t_idx]
+
+    coef = (1.0 - alpha_t) / (1.0 - alpha_bar).sqrt()
+    mean = (x_t - coef * eps_pred) / alpha_t.sqrt()
+
+    if t_idx == 0:
+        return mean
+    return mean + beta_t.sqrt() * torch.randn_like(x_t)
+
+
+@torch.no_grad()
+def p_sample_loop_point_cloud(
+    model: PointNetDenoiser,
+    c: torch.Tensor,
+    n_points: int,
+    T: int,
+    betas: torch.Tensor,
+    alphas: torch.Tensor,
+    alphas_cumprod: torch.Tensor,
+) -> torch.Tensor:
+    """Full DDPM reverse chain for point clouds shaped (B, N, C)."""
+    x = torch.randn(c.shape[0], n_points, model.input_dim, device=c.device)
+    for t_idx in reversed(range(T)):
+        x = p_sample_point_cloud(model, x, t_idx, c, betas, alphas, alphas_cumprod)
+    return x
+
+
 def resample_points(
     points: torch.Tensor,
     n_points: int,

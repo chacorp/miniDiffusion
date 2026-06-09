@@ -342,3 +342,68 @@ class JsonShapeDataset(Dataset):
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         return self.points[idx], self.labels[idx]
+
+
+class JsonPointShapeDataset(JsonShapeDataset):
+    """Point-cloud dataset for PointNet-style denoising from JSON shapes.
+
+    Each JSON file is one class. Each item returns a class-level point pool
+    shaped (M, 2), plus its class label. Use a collate function such as
+    VariablePointCountCollate to sample a minibatch-wide N from that pool.
+    """
+
+    def __init__(
+        self,
+        data_dir: str = "data",
+        points_per_shape: int = 10000,
+        noise: float = 0.005,
+        split: str = "train",
+        val_ratio: float = 0.1,
+        items_per_epoch: int = 2048,
+        seed: int = 42,
+    ):
+        if split not in {"train", "val", "all"}:
+            raise ValueError(f"split must be 'train', 'val', or 'all', got {split!r}")
+
+        rng = np.random.default_rng(seed)
+        json_files = sorted(Path(data_dir).glob("*.json"))
+        K = len(json_files)
+        assert K > 0, f"No JSON files found in {data_dir}"
+
+        self.clouds: list[torch.Tensor] = []
+        self.shape_names = [f.stem for f in json_files]
+        self.num_clusters = K
+        self.items_per_epoch = int(items_per_epoch)
+
+        all_pts: list[torch.Tensor] = []
+        all_lbl: list[torch.Tensor] = []
+        for idx, filepath in enumerate(json_files):
+            with open(filepath, encoding="utf-8") as f:
+                shape = json.load(f)
+
+            pts = self._sample_shape(shape, points_per_shape, rng)
+            pts = pts + rng.standard_normal(pts.shape).astype(np.float32) * noise
+            perm = rng.permutation(len(pts))
+
+            n_val = int(len(pts) * val_ratio)
+            if split == "train":
+                pts = pts[perm[n_val:]]
+            elif split == "val":
+                pts = pts[perm[:n_val]]
+            else:
+                pts = pts[perm]
+
+            cloud = torch.from_numpy(pts.astype(np.float32))
+            self.clouds.append(cloud)
+            all_pts.append(cloud)
+            all_lbl.append(torch.full((len(cloud),), idx, dtype=torch.long))
+
+        self.points = torch.cat(all_pts, dim=0)
+        self.labels = torch.cat(all_lbl, dim=0)
+
+    def __len__(self) -> int:
+        return self.items_per_epoch
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+        cls = idx % self.num_clusters
+        return self.clouds[cls], cls

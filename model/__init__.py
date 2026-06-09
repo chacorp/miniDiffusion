@@ -14,6 +14,8 @@ from .pointnet_denoiser import (
     PointNetFiLMBlock,
     PointNetDenoiser,
     q_sample_point_cloud,
+    p_sample_point_cloud,
+    p_sample_loop_point_cloud,
     resample_points,
     VariablePointCountCollate,
 )
