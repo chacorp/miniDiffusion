@@ -19,3 +19,10 @@ from .pointnet_denoiser import (
     resample_points,
     VariablePointCountCollate,
 )
+from .pointnet_denoiser_cnd import (
+    PointNetEncoder,
+    CrossAttentionBlock,
+    PointNetDenoiserCnd,
+    SelfReconCollate,
+    ddim_sample_cnd,
+)
