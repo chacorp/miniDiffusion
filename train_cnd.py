@@ -53,6 +53,8 @@ config = dict(
     # training
     sample_every=10,
     p_uncond=0.15,
+    # aux reconstruction loss
+    recon_lambda=0.1,
     # DDIM for visualization
     ddim_steps=50,
     cfg_w=1.5,
@@ -203,15 +205,23 @@ for epoch in range(1, cfg.epochs + 1):
 
         x_t, noise = q_sample_point_cloud(x0, t, sqrt_ab, sqrt_one_minus_ab)
 
-        # Encode condition; CFG dropout → null_token
-        cond_tokens = model.encode_cond(cond_pc)                          # [B, M, D]
-        drop_mask   = torch.rand(B, device=device) < cfg.p_uncond         # [B]
-        null_tokens = model.get_null_tokens(B, device).expand_as(cond_tokens)
-        cond_tokens = torch.where(drop_mask[:, None, None], null_tokens, cond_tokens)
+        # Encode condition; CFG dropout -> null_token
+        global_token, pre_pool = model.encode_cond(cond_pc)               # [B,1,D], [B,M,D]
+        drop_mask    = torch.rand(B, device=device) < cfg.p_uncond        # [B]
+        null_token   = model.get_null_tokens(B, device)                   # [B,1,D]
+        cond_token   = torch.where(drop_mask[:, None, None],
+                                   null_token, global_token)              # [B,1,D]
 
-        pred        = model(x_t, t, cond_tokens)
+        # Diffusion loss
+        pred        = model(x_t, t, cond_token)
         per_sample  = F.mse_loss(pred, noise, reduction="none").mean(dim=(1, 2))
-        loss        = (min_snr_w[t] * per_sample).mean()
+        l_diff      = (min_snr_w[t] * per_sample).mean()
+
+        # Aux reconstruction loss (encoder -> decoder)
+        recon       = model.decode(pre_pool)                              # [B, M, C]
+        l_recon     = F.mse_loss(recon, cond_pc)
+
+        loss = l_diff + cfg.recon_lambda * l_recon
 
         optimizer.zero_grad()
         loss.backward()
@@ -230,8 +240,8 @@ for epoch in range(1, cfg.epochs + 1):
 
             t = torch.randint(0, cfg.T, (B,), device=device)
             x_t, noise  = q_sample_point_cloud(x0, t, sqrt_ab, sqrt_one_minus_ab)
-            cond_tokens = model.encode_cond(cond_pc)
-            val_loss   += F.mse_loss(model(x_t, t, cond_tokens), noise).item()
+            global_token, _ = model.encode_cond(cond_pc)
+            val_loss += F.mse_loss(model(x_t, t, global_token), noise).item()
 
     scheduler.step()
 
@@ -239,7 +249,8 @@ for epoch in range(1, cfg.epochs + 1):
     avg_val   = val_loss   / len(val_loader)
     lr        = scheduler.get_last_lr()[0]
 
-    wandb.log({"train/loss": avg_train, "val/loss": avg_val, "lr": lr}, step=epoch)
+    wandb.log({"train/loss": avg_train, "val/loss": avg_val, "lr": lr,
+               "lambda_recon": cfg.recon_lambda}, step=epoch)
 
     if avg_val < best_val:
         best_val = avg_val
@@ -251,5 +262,5 @@ for epoch in range(1, cfg.epochs + 1):
         log_samples(epoch)
 
 torch.save(model.state_dict(), run_dir / "model.pt")
-print(f"done — best val={best_val:.6f}  saved to {run_dir}")
+print(f"done - best val={best_val:.6f}  saved to {run_dir}")
 wandb.finish()
